@@ -1,0 +1,10 @@
+log:
+  level: info
+runner:
+  capacity: 2
+  timeout: 1h
+container:
+  # Los contenedores de los jobs se unen a la red del stack para ver sonarqube:9000
+  network: devops-net
+  privileged: false
+  valid_volumes: []

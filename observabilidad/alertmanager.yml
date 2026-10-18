@@ -1,0 +1,13 @@
+route:
+  receiver: correo-local
+  group_by: [alertname]
+  group_wait: 10s
+  repeat_interval: 4h
+receivers:
+  - name: correo-local
+    email_configs:
+      - to: isaac@local.test
+        from: alertmanager@local.test
+        smarthost: mailpit:1025
+        require_tls: false
+        send_resolved: true

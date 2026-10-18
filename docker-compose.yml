@@ -1,0 +1,213 @@
+# Fase 1: Gitea + act_runner + SonarQube (+ PostgreSQL propio de cada uno)
+# Puertos: Gitea 3030 (web) / 2222 (ssh), SonarQube 9000.
+# 3100 queda libre para Loki en la Fase 2.
+name: devops-local
+
+networks:
+  devops:
+    name: devops-net
+
+volumes:
+  gitea_data:
+  gitea_db:
+  sonar_db:
+  sonar_data:
+  sonar_extensions:
+  sonar_logs:
+  runner_data:
+  loki_data:
+  grafana_data:
+  prometheus_data:
+  tempo_data:
+
+services:
+  gitea-db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: gitea
+      POSTGRES_PASSWORD: ${GITEA_DB_PASSWORD}
+      POSTGRES_DB: gitea
+    volumes: [gitea_db:/var/lib/postgresql/data]
+    networks: [devops]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gitea"]
+      interval: 5s
+      retries: 10
+
+  gitea:
+    image: gitea/gitea:1.24
+    restart: unless-stopped
+    depends_on:
+      gitea-db: { condition: service_healthy }
+    environment:
+      GITEA__database__DB_TYPE: postgres
+      GITEA__database__HOST: gitea-db:5432
+      GITEA__database__NAME: gitea
+      GITEA__database__USER: gitea
+      GITEA__database__PASSWD: ${GITEA_DB_PASSWORD}
+      GITEA__server__ROOT_URL: http://localhost:3030/
+      GITEA__server__SSH_PORT: 2222
+      GITEA__actions__ENABLED: "true"
+      GITEA__metrics__ENABLED: "true"
+      GITEA__service__DISABLE_REGISTRATION: "true"
+      GITEA__security__INSTALL_LOCK: "true"
+    ports:
+      - "3030:3000"
+      - "2222:22"
+    volumes: [gitea_data:/data]
+    networks: [devops]
+
+  runner:
+    image: gitea/act_runner:latest
+    restart: unless-stopped
+    depends_on: [gitea]
+    environment:
+      GITEA_INSTANCE_URL: http://gitea:3000
+      GITEA_RUNNER_REGISTRATION_TOKEN: ${RUNNER_TOKEN:-}
+      GITEA_RUNNER_NAME: local-runner
+      GITEA_RUNNER_LABELS: "ubuntu-latest:docker://node:20-bookworm,ubuntu-22.04:docker://node:20-bookworm"
+      CONFIG_FILE: /config.yaml
+    volumes:
+      - runner_data:/data
+      - ./runner/config.yaml:/config.yaml:ro
+      - /var/run/docker.sock:/var/run/docker.sock  # acceso al Docker del host: solo uso local
+    networks: [devops]
+
+  sonar-db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: sonar
+      POSTGRES_PASSWORD: ${SONAR_DB_PASSWORD}
+      POSTGRES_DB: sonarqube
+    volumes: [sonar_db:/var/lib/postgresql/data]
+    networks: [devops]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sonar"]
+      interval: 5s
+      retries: 10
+
+  sonarqube:
+    image: sonarqube:community
+    restart: unless-stopped
+    depends_on:
+      sonar-db: { condition: service_healthy }
+    environment:
+      SONAR_JDBC_URL: jdbc:postgresql://sonar-db:5432/sonarqube
+      SONAR_JDBC_USERNAME: sonar
+      SONAR_JDBC_PASSWORD: ${SONAR_DB_PASSWORD}
+    ports:
+      - "9000:9000"
+    volumes:
+      - sonar_data:/opt/sonarqube/data
+      - sonar_extensions:/opt/sonarqube/extensions
+      - sonar_logs:/opt/sonarqube/logs
+    networks: [devops]
+
+  # ---- Fase 2: observabilidad ----
+  loki:
+    image: grafana/loki:3.4.2
+    restart: "no"
+    profiles: [obs]
+    command: -config.file=/etc/loki/loki.yaml
+    volumes:
+      - ./observabilidad/loki.yaml:/etc/loki/loki.yaml:ro
+      - loki_data:/loki
+    networks: [devops]
+
+  alloy:
+    image: grafana/alloy:latest
+    restart: "no"
+    profiles: [obs]
+    depends_on: [loki]
+    command: run --server.http.listen-addr=0.0.0.0:12345 /etc/alloy/config.alloy
+    volumes:
+      - ./observabilidad/alloy.alloy:/etc/alloy/config.alloy:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks: [devops]
+
+  grafana:
+    image: grafana/grafana:latest
+    restart: "no"
+    profiles: [obs]
+    depends_on: [loki]
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    ports:
+      - "3002:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./observabilidad/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observabilidad/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    networks: [devops]
+
+  # ---- Fase 3: métricas ----
+  prometheus:
+    image: prom/prometheus:latest
+    restart: "no"
+    profiles: [obs]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=15d
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./observabilidad/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observabilidad/alertas.yml:/etc/prometheus/alertas.yml:ro
+      - prometheus_data:/prometheus
+    networks: [devops]
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:latest
+    restart: "no"
+    profiles: [obs]
+    privileged: true
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+    networks: [devops]
+
+  node-exporter:
+    image: prom/node-exporter:latest
+    restart: "no"
+    profiles: [obs]
+    pid: host
+    command: [--path.rootfs=/host]
+    volumes:
+      - /:/host:ro
+    networks: [devops]
+
+  # ---- Fase 4: alertas y trazas ----
+  alertmanager:
+    image: prom/alertmanager:latest
+    restart: "no"
+    profiles: [obs]
+    volumes:
+      - ./observabilidad/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    networks: [devops]
+
+  mailpit:   # buzón SMTP local: las alertas se leen en http://localhost:8025
+    image: axllent/mailpit:latest
+    restart: "no"
+    profiles: [obs]
+    ports:
+      - "8025:8025"
+    networks: [devops]
+
+  tempo:
+    image: grafana/tempo:2.7.2
+    restart: "no"
+    profiles: [obs]
+    user: root
+    command: -config.file=/etc/tempo.yaml
+    ports:
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP
+    volumes:
+      - ./observabilidad/tempo.yaml:/etc/tempo.yaml:ro
+      - tempo_data:/var/tempo
+    networks: [devops]

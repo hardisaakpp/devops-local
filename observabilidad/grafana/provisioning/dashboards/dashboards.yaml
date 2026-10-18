@@ -1,0 +1,6 @@
+apiVersion: 1
+providers:
+  - name: local
+    folder: DevOps local
+    type: file
+    options: { path: /var/lib/grafana/dashboards }

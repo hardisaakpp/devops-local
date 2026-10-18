@@ -1,0 +1,18 @@
+groups:
+  - name: basicas
+    rules:
+      - alert: ContenedorCaido
+        expr: time() - container_last_seen{name!="",name!~"GITEA-ACTIONS.*"} > 60
+        for: 1m
+        labels: { severity: critical }
+        annotations: { summary: "Contenedor {{ $labels.name }} sin reportar hace más de 1 min" }
+      - alert: MemoriaHostAlta
+        expr: (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) > 0.85
+        for: 5m
+        labels: { severity: warning }
+        annotations: { summary: "Memoria del host sobre 85 %" }
+      - alert: DiscoLleno
+        expr: (1 - node_filesystem_avail_bytes{mountpoint="/",fstype!="tmpfs"} / node_filesystem_size_bytes{mountpoint="/",fstype!="tmpfs"}) > 0.85
+        for: 10m
+        labels: { severity: warning }
+        annotations: { summary: "Disco raíz sobre 85 %" }
